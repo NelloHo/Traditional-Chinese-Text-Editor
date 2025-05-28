@@ -1,0 +1,242 @@
+<!DOCTYPE html>
+<html lang="zh-TW" class="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>繁體中文程式碼編輯器</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = { darkMode: 'class' };
+  </script>
+  <style>
+    body {
+      font-family: 'Inter', 'PingFang TC', 'Microsoft JhengHei', 'Noto Sans TC', sans-serif;
+    }
+    .caret-mirror-div {
+      position: absolute;
+      top: -9999px;
+      left: -9999px;
+      white-space: pre-wrap;
+      word-wrap: break-word;
+      overflow: auto;
+      pointer-events: none;
+      box-sizing: content-box;
+    }
+    #suggestionsBox {
+      z-index: 1000;
+      max-height: 200px;
+      overflow-y: auto;
+    }
+    .suggestion-item {
+      cursor: pointer;
+    }
+    .suggestion-item.selected {
+      background-color: #2563eb;
+      color: white;
+    }
+    .suggestion-item:hover {
+      background-color: #1e40af;
+      color: white;
+    }
+  </style>
+</head>
+<body class="bg-gray-900 text-gray-100 min-h-screen flex flex-col items-center justify-center p-0">
+
+  <div class="w-full max-w-6xl bg-gray-800 shadow-xl rounded-lg flex flex-col md:flex-row gap-6">
+
+    <!-- 編輯器區域 -->
+    <div class="flex-1 -mt-6">
+      <div id="editorContainer" class="relative">
+        <textarea
+          id="codeInput"
+          class="w-full h-64 p-3 bg-gray-900 text-white rounded-md resize-none focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none text-base leading-relaxed"
+          placeholder="在此輸入程式碼..."
+        ></textarea>
+        <div id="suggestionsBox" class="absolute hidden bg-gray-800 border border-gray-600 rounded-md shadow-lg" style="margin-top: 2px;"></div>
+      </div>
+      <div id="mirrorDiv" class="caret-mirror-div"></div>
+    </div>
+
+    <!-- 自訂關鍵字區域 -->
+    <div class="w-full md:w-64 p-6 pt-0">
+      <h2 class="text-lg font-medium text-gray-100 mb-2">自訂關鍵字</h2>
+      <div class="flex mb-3 gap-2">
+        <input id="customKeywordInput" type="text"
+               class="flex-1 border border-gray-700 bg-gray-900 text-white rounded-md px-2 py-1 focus:ring-2 focus:ring-blue-500 outline-none"
+               placeholder="輸入關鍵字">
+        <button id="addKeywordBtn"
+                class="bg-blue-600 text-white px-3 py-1 rounded-md hover:bg-blue-700">
+          新增
+        </button>
+      </div>
+      <ul id="customKeywordList" class="list-none text-sm text-gray-300 space-y-1"></ul>
+    </div>
+  </div>
+
+  <script>
+    const codeInput = document.getElementById('codeInput');
+    const suggestionsBox = document.getElementById('suggestionsBox');
+    const mirrorDiv = document.getElementById('mirrorDiv');
+    const customKeywordInput = document.getElementById('customKeywordInput');
+    const addKeywordBtn = document.getElementById('addKeywordBtn');
+    const customKeywordList = document.getElementById('customKeywordList');
+
+    const traditionalChineseKeywords = [
+      "函數", "變數", "常數", "迴圈", "如果", "否則", "否則如果",
+      "陣列", "物件", "字串", "數字", "布林值", "空值", "未定義",
+      "匯入", "匯出", "類別", "方法", "建構子", "繼承", "異步", "等待",
+      "嘗試", "捕捉", "最終", "拋出", "回傳", "新建", "此", "型別",
+      "介面", "列舉", "模組", "套件", "公開", "私有", "保護", "靜態"
+    ];
+
+    let currentWordInfoForCompletion = { word: "", startIndex: 0, caretPositionAfterWord: 0 };
+    let selectedIndex = -1;
+
+    function getCaretCoordinates(element, position) {
+      const style = window.getComputedStyle(element);
+      const mirrorStyles = ['borderTopWidth','borderRightWidth','borderBottomWidth','borderLeftWidth','paddingTop','paddingRight','paddingBottom','paddingLeft','fontFamily','fontSize','fontWeight','fontStyle','letterSpacing','lineHeight','textAlign','textIndent','textTransform','whiteSpace','wordSpacing','boxSizing'];
+      mirrorStyles.forEach(prop => mirrorDiv.style[prop] = style[prop]);
+      let width = parseFloat(style.width);
+      if (style.boxSizing === 'border-box') {
+        width -= (parseFloat(style.paddingLeft) || 0) + (parseFloat(style.paddingRight) || 0)
+               + (parseFloat(style.borderLeftWidth) || 0) + (parseFloat(style.borderRightWidth) || 0);
+      }
+      mirrorDiv.style.width = `${width}px`;
+      mirrorDiv.textContent = element.value.substring(0, position);
+      const span = document.createElement('span');
+      span.innerHTML = '&#8203;';
+      mirrorDiv.appendChild(span);
+      return {
+        x: span.offsetLeft - element.scrollLeft,
+        y: span.offsetTop + (parseFloat(style.lineHeight) || (parseFloat(style.fontSize) * 1.2)) - element.scrollTop
+      };
+    }
+
+    function scrollCaretIntoTextAreaView() {
+      const caretPos = codeInput.selectionStart;
+      const coords = getCaretCoordinates(codeInput, caretPos);
+      const areaHeight = codeInput.clientHeight;
+      const scrollThreshold = areaHeight * 2 / 3;
+      if (coords.y > scrollThreshold + codeInput.scrollTop) {
+        codeInput.scrollTop = coords.y - scrollThreshold;
+      }
+    }
+
+    function getCurrentWordInfo(text, caretPosition) {
+      const before = text.substring(0, caretPosition);
+      for (let i = 1; i <= 5; i++) {
+        const start = Math.max(0, caretPosition - i);
+        const candidate = before.slice(start);
+        if (traditionalChineseKeywords.some(k => k.startsWith(candidate))) {
+          return { word: candidate, startIndex: start };
+        }
+      }
+      return { word: "", startIndex: caretPosition };
+    }
+
+    function updateSuggestionSelection() {
+      document.querySelectorAll('.suggestion-item').forEach((el, i) =>
+        el.classList.toggle('selected', i === selectedIndex));
+    }
+
+    function insertSelectedSuggestion() {
+      const items = suggestionsBox.querySelectorAll('.suggestion-item');
+      if (items.length === 0) return;
+      if (selectedIndex === -1) selectedIndex = 0;
+      if (items[selectedIndex]) items[selectedIndex].click();
+    }
+
+    function handleAutocomplete() {
+      const text = codeInput.value;
+      const caret = codeInput.selectionStart;
+      const { word, startIndex } = getCurrentWordInfo(text, caret);
+      currentWordInfoForCompletion = { word, startIndex, caretPositionAfterWord: caret };
+      if (!word.trim()) return suggestionsBox.classList.add('hidden');
+
+      const matches = traditionalChineseKeywords.filter(k => k.startsWith(word) && k !== word);
+      if (matches.length === 0) return suggestionsBox.classList.add('hidden');
+
+      suggestionsBox.innerHTML = '';
+      selectedIndex = 0;
+      matches.forEach((k, i) => {
+        const div = document.createElement('div');
+        div.className = 'p-2 hover:bg-blue-700 cursor-pointer suggestion-item rounded-md';
+        const highlighted = `<span class="font-bold text-blue-400">${k.slice(0, word.length)}</span>${k.slice(word.length)}`;
+        div.innerHTML = highlighted;
+        div.onclick = () => {
+          const v = codeInput.value;
+          codeInput.value = v.slice(0, currentWordInfoForCompletion.startIndex) + k + v.slice(currentWordInfoForCompletion.caretPositionAfterWord);
+          const newCaret = currentWordInfoForCompletion.startIndex + k.length;
+          codeInput.setSelectionRange(newCaret, newCaret);
+          suggestionsBox.classList.add('hidden');
+          codeInput.focus();
+        };
+        suggestionsBox.appendChild(div);
+      });
+
+      updateSuggestionSelection();
+
+      const coords = getCaretCoordinates(codeInput, caret);
+      suggestionsBox.style.left = `${codeInput.offsetLeft + coords.x}px`;
+      suggestionsBox.style.top = `${codeInput.offsetTop + coords.y}px`;
+      suggestionsBox.classList.remove('hidden');
+    }
+
+    codeInput.addEventListener('input', () => {
+      handleAutocomplete();
+      scrollCaretIntoTextAreaView();
+    });
+
+    codeInput.addEventListener('keydown', e => {
+      const items = suggestionsBox.querySelectorAll('.suggestion-item');
+      if (!suggestionsBox.classList.contains('hidden') && items.length > 0) {
+        if (e.key === 'ArrowDown') { e.preventDefault(); selectedIndex = (selectedIndex + 1) % items.length; updateSuggestionSelection(); }
+        else if (e.key === 'ArrowUp') { e.preventDefault(); selectedIndex = (selectedIndex - 1 + items.length) % items.length; updateSuggestionSelection(); }
+        else if (e.key === 'Enter' || e.key === 'Tab') { e.preventDefault(); insertSelectedSuggestion(); }
+        else if (e.key === 'Escape') { suggestionsBox.classList.add('hidden'); selectedIndex = -1; }
+      }
+      setTimeout(scrollCaretIntoTextAreaView, 0);
+    });
+
+    document.addEventListener('click', e => {
+      if (!codeInput.contains(e.target) && !suggestionsBox.contains(e.target)) {
+        suggestionsBox.classList.add('hidden'); selectedIndex = -1;
+      }
+    });
+
+    function addCustomKeyword(word) {
+      if (!word || traditionalChineseKeywords.includes(word)) return;
+      traditionalChineseKeywords.push(word);
+      const li = document.createElement('li');
+      li.className = 'flex items-center justify-between px-2 py-1 bg-gray-700 rounded';
+      const span = document.createElement('span');
+      span.textContent = word;
+      li.appendChild(span);
+      const delBtn = document.createElement('button');
+      delBtn.className = 'text-red-400 hover:text-red-600 text-sm ml-2';
+      delBtn.textContent = '✕';
+      delBtn.onclick = () => {
+        const idx = traditionalChineseKeywords.indexOf(word);
+        if (idx > -1) traditionalChineseKeywords.splice(idx, 1);
+        li.remove();
+      };
+      li.appendChild(delBtn);
+      customKeywordList.appendChild(li);
+    }
+
+    addKeywordBtn.addEventListener('click', () => {
+      const word = customKeywordInput.value.trim();
+      addCustomKeyword(word);
+      customKeywordInput.value = '';
+      customKeywordInput.focus();
+    });
+
+    customKeywordInput.addEventListener('keydown', e => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        addKeywordBtn.click();
+      }
+    });
+  </script>
+</body>
+</html>
